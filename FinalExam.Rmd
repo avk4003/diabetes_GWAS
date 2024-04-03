@@ -1,0 +1,398 @@
+---
+title: "FinalExam"
+author: "Ayush Kris"
+date: "2023-05-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(MASS)
+library(dplyr)
+library(ggplot2)
+```
+
+### 1)
+
+importing phenotype data and plotting histogram
+
+```{r}
+pheno_1 <- read.table("2023QG_finalexam_insulin.txt", header=FALSE)
+hist(pheno_1$V1,breaks = 10, main="Histogram of Baseline Insulin Levels", xlab = "Insulin level" ) #might have to scale()
+
+```
+
+Looking at the raw data and the histogram of the data, we can clearly see that it is somewhat normally distributed and continuous, thus making it a good candidate for linear regression. If the data were categorical or discrete, or for example in the histogram we see two distinct peaks, the logistic regression would be more fitting.
+
+### 2)
+
+```{r}
+pheno_2 <- read.table("2023QG_finalexam_diabetes.txt", header=FALSE)
+hist(pheno_2$V1, main="Disease State phenotypes", xlab = "Diabetes Status" )
+
+```
+
+Logistic regression is appropriate since the distribution is not continuous, but is categorical with only two outcomes: 1 or 0.
+
+### 3)
+
+Importing covariate data and plotting histogram
+
+```{r}
+xc_mat <- read.table("2023QG_finalexam_ancestry.txt", header=FALSE)
+hist(xc_mat$V1, main="Ancestry Group Histogram", xlab = "Ancestry Group" )
+```
+
+If the marker is not correlated with a causal polymorphism but the factor is correlated with the phenotype and the marker such that a test of the marker, will cause false positive
+
+If these populations differ in frequencies of genotypes at a subset of measured genotypes / polymorphisms OR in the mean value of the phenotype, will cause false positives.
+
+The marker is correlated with a causal polymorphism and while the factor is correlated with the phenotype but not the marker will reduce power.
+
+### 4)
+
+Importing genotype data
+
+```{r}
+geno <- read.table("2023QG_finalexam_genotypes.txt",sep = ',',header=FALSE)
+new_colnames <-(1:ncol(geno))
+
+#Assign new column headings to the data frame
+colnames(geno) <- new_colnames
+
+dim(geno)
+geno_xa<-((geno)-1)
+geno_xd <- (abs(geno_xa)*2)-1
+```
+
+There are 22001 genotypes
+
+### 5)
+
+Linear GWAS with no covariates
+
+```{r}
+pval_calculator <- function(pheno_input, xa_input, xd_input){
+    n_samples <- length(xa_input)
+    # Combine the data for the beta estimates
+    X_mx <- cbind(1,xa_input,xd_input)
+    # Estimate the beta values
+    MLE_beta <- ginv(t(X_mx) %*% X_mx) %*% t(X_mx) %*% pheno_input
+    # Estimate y_hat
+    y_hat <- X_mx %*% MLE_beta
+    
+    # Calculate SSM,SSE,MSM,MSE,F-statistic, and p-value
+    SSM <- sum((y_hat - mean(pheno_input))^2)
+    SSE <- sum((pheno_input - y_hat)^2)
+    df_M <- ncol(X_mx)-1
+    df_E <- n_samples - 3 
+    MSM <- SSM / df_M
+    MSE <- SSE / df_E
+    Fstatistic <- MSM / MSE
+    pval <- pf(Fstatistic, df_M, df_E,lower.tail = FALSE)
+    return(pval)
+}
+pval_mx <- rep(0,ncol(geno_xa))
+for(i in 1:ncol(geno_xa)){
+  pval_mx[i] <- pval_calculator(pheno_1[,1], geno_xa[,i], geno_xd[,i])
+}
+pval_mx[1:10]
+
+n_tests <- length(pval_mx) #3000
+bonferroni <- 0.05 / n_tests
+
+
+plot_df <- data.frame(index = 1:length(pval_mx), pval = pval_mx)
+plot<-ggplot(plot_df, aes(index, -log10(pval_mx))) + geom_point()
+
+plot + geom_hline(yintercept = -log10(bonferroni))+ggtitle("Linear GWAS Manhattan Plot") + xlab("SNP")
+```
+
+qq plot
+
+```{r}
+observed_pvals = sort(pval_mx)
+expected_pvals = qunif(seq(0, 1, length.out = length(observed_pvals) + 2), min = 0, max = 1)
+expected_pvals = expected_pvals[expected_pvals != 0 & expected_pvals != 1]
+df.qq = data.frame(observed = -log10(observed_pvals),
+expected = -log10(expected_pvals))
+# Plot
+ggplot(df.qq, aes(x = expected, y = observed)) +
+geom_point(alpha=0.5) +
+geom_abline(intercept = 0, slope = 1) +
+labs(x = '-log10 Expected p-val',
+y = '-log10 Observed p-val',
+title = 'Linear GWAS QQ plot')
+```
+
+### 6)
+
+Linear GWAS with ancestry as covariate
+
+(Ancestry as a (single) covariate, thus using integer encoded as already provided)
+
+```{r}
+
+pval_calculator_w_covars <- function(pheno_input, xa_input, xd_input, xz_input){
+  n_samples <- length(xa_input) # calculate your number of samples
+  X_mx <- cbind(rep(1,length(xa_input)),xa_input, xd_input, xz_input) #create your X matrix under H1
+  
+  MLE_beta <- ginv(t(X_mx) %*% X_mx) %*% t(X_mx) %*% pheno_input #calculate your MLE of the betas
+  
+  x_h0 =  cbind(rep(1,length(xa_input)), xz_input) #calculate your x under H0
+  MLE_h0 = ginv(t(x_h0) %*% x_h0) %*% t(x_h0) %*% pheno_input #calculate your MLE under h0
+  y_hat_0 = x_h0 %*% MLE_h0 #calculate y_hat under the null hypothesis
+  y_hat_1 = X_mx%*% MLE_beta #calculate y_hat under H1
+  
+  SSE_theta_0 = sum((pheno_input-y_hat_0)^2) #calculate SSE under null 
+  SSE_theta_1 = sum((pheno_input-y_hat_1)^2) #calculate SSE under H1
+  
+  df_M <- 2
+  df_E <- n_samples - 4 
+  
+  numerator <- (SSE_theta_0-SSE_theta_1) / df_M #calculate your F statistic
+  denom <- SSE_theta_1 / df_E
+  Fstatistic <-numerator / denom
+  
+  # to check if it is correct 
+  pval <- pf(Fstatistic, df_M, df_E,lower.tail = FALSE) #calculate your p value and return it
+  return(pval)
+}
+
+pval_mx_covar <- rep(0,ncol(geno_xa))
+for(i in 1:ncol(geno_xa)){
+  pval_mx_covar[i] <- pval_calculator_w_covars(pheno_1[,1], geno_xa[,i], geno_xd[,i], xc_mat[,1])
+}
+pval_mx_covar[1:10]
+
+
+
+plot_df_covar <- data.frame(index = 1:length(pval_mx_covar), pval = pval_mx_covar)
+plot_covar<-ggplot(plot_df_covar, aes(index, -log10(pval_mx_covar))) + geom_point()
+
+plot_covar + geom_hline(yintercept = -log10(bonferroni))+ggtitle("Manhattan Plot w Covar") + xlab("SNP")
+
+observed_pvals = sort(pval_mx_covar)
+expected_pvals = qunif(seq(0, 1, length.out = length(observed_pvals) + 2), min = 0, max = 1)
+expected_pvals = expected_pvals[expected_pvals != 0 & expected_pvals != 1]
+df.qq = data.frame(observed = -log10(observed_pvals),
+expected = -log10(expected_pvals))
+# Plot
+ggplot(df.qq, aes(x = expected, y = observed)) +
+geom_point(alpha=0.5) +
+geom_abline(intercept = 0, slope = 1) +
+labs(x = '-log10 Expected p-val',
+y = '-log10 Observed p-val',
+title = 'GWAS QQ plot w Covar')
+
+```
+
+### 7)
+
+a\.
+
+The analysis incorporating the covariates [6] resulted in appropriate model fit to the Data. The amount of positive hits seen in the manhattan plot has significantly reduced when covariates were accounted for, suggesting a reduction in false positives, and more importantly, the QQ plot produced by the GWAS with covariates now follows very closely to the expected values (solid line) since most of the p-values observed follow a uniform distribution whereas the QQ plot in [5] did not, which suggests that there are unaccounted covariates in the GWAS analysis in [5]
+
+b\.
+
+With alpha set to 0.05, the critical adjusted P value using bonforonni adjustment to address multiple hypothesis testing is 0.05/no. of tests which is 0.05/22001 = 2.272624e-06
+
+```{r}
+sig_hits <- subset(plot_df_covar,pval<bonferroni)
+```
+
+c\.
+
+From the manhattan plot in [6] there are 2 separate distinct peaks: one around the \~7020 position, and at the \~19700 position.The most significant SNP of the peaks are : 7046 (p=2.767575e-20), and 19757 (p=4.242741e-12)
+
+d\.
+
+The most significant SNP in each peak is not necessarily closest to the causal genotype compared to the SNPs on each side of it. A peak indicates SNPs with the strongest evidence of association in that region but it does not provide direct information about the specific SNP that is causally related to the phenotype due to limit of resolution in GWAS due to linkage disequilibrium.
+
+### 8)
+
+Logistic GWAS
+
+```{r}
+Y <- read.table("2023QG_finalexam_diabetes.txt", header = F,stringsAsFactors = F)
+Y <- as.matrix(Y)
+colnames(Y) <- NULL
+Y[Y[,1] < 0.5, 1] <- 0
+Y[Y[,1] > 0.5, 1] <- 1
+gamma_inv_calc <- function(X_mx, beta_t){
+    #initialize gamma
+    # K is the part which goes into the exponent
+    K <- X_mx %*% beta_t
+    gamma_inv <- exp(K)/(1+exp(K))
+    return(gamma_inv)
+}
+W_calc <- function(gamma_inv){
+        W <- diag(as.vector(gamma_inv * (1- gamma_inv)))
+    return(W)
+}
+beta_update <- function(X_mx, W, Y, gamma_inv, beta){
+  #print(dim(X_mx))
+  #print(dim(W))
+  beta_up <- beta + ginv(t(X_mx)%*%W%*%X_mx)%*%t(X_mx)%*%(Y-gamma_inv)
+    return(beta_up)
+}
+dev_calc <- function(Y, gamma_inv){
+    deviance <- 2*( sum(Y[Y==1]*log(Y[Y==1]/gamma_inv[Y==1])) + sum((1-Y[Y==0])*log((1-Y[Y==0])/(1-gamma_inv[Y==0]))) )  
+    return(deviance)
+}
+
+loglik_calc <- function(Y, gamma_inv){
+    loglik <- sum(Y*log(gamma_inv)+(1-Y)*log(1-gamma_inv))
+    return(loglik)
+}
+
+####################################################
+
+logistic.IRLS.recursive <- function(Y, X_mx, beta_t, dpt1, gamma_inv,
+                                    iter, d.stop.th = 1e-6, it.max = 100){
+    # create empty matrix W
+        W <- W_calc(gamma_inv)
+    
+        beta_t <- beta_update(X_mx, W, Y, gamma_inv, beta_t)
+        
+        #update gamma since it's a function of beta
+        gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+        
+        #calculate new deviance
+        dt <- dev_calc(Y, gamma_inv)
+        absD <- abs(dt - dpt1)
+        
+        if(absD < d.stop.th | iter > it.max) {
+            #cat("Convergence at iteration:", i, "at threshold:", d.stop.th, "\n")
+            logl <- loglik_calc(Y, gamma_inv)
+            return(list(beta_t,logl))
+        }   else {
+          return(logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv, iter+1,
+                                         d.stop.th = 1e-6, it.max = 100))
+        }
+}
+logistic.IRLS.pval.recursive <- function(Xa,Xd,Y, beta.initial.vec = c(0,0,0),
+                                         d.stop.th = 1e-6, it.max = 100) {
+  #Initialize
+  beta_t <- beta.initial.vec
+    dt <- 0
+    
+  X_mx <- cbind(rep(1,nrow(Y)), Xa, Xd)
+  gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+    h1 <- logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv,
+                                  1, d.stop.th = 1e-6, it.max = 100)
+    
+    X_mx <- cbind(rep(1,nrow(Y)), rep(0,nrow(Y)),rep(0,nrow(Y)))
+  gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+    h0 <- logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv,
+                                  1, d.stop.th = 1e-6, it.max = 100)
+
+    LRT <- 2*h1[[2]]-2*h0[[2]] #likelihood ratio test statistic
+  pval <- pchisq(LRT, 2, lower.tail = F)
+    return(pval)
+}
+pval_mx_log <- rep(0,ncol(geno_xa))
+for(i in 1:ncol(geno_xa)){
+  pval_mx_log[i] <- logistic.IRLS.pval.recursive(Xa=geno_xa[,i], Xd=geno_xd[,i], Y=Y)
+}
+pval_mx_log[1:10]
+
+
+plot_df_covar <- data.frame(index = 1:length(pval_mx_log), pval = pval_mx_log)
+plot_covar<-ggplot(plot_df_covar, aes(index, -log10(pval_mx_log))) + geom_point()
+
+plot_covar + geom_hline(yintercept = -log10(bonferroni))+ggtitle("Logistic GWAS Manhattan Plot") + xlab("SNP")
+
+observed_pvals = sort(pval_mx_log)
+expected_pvals = qunif(seq(0, 1, length.out = length(observed_pvals) + 2), min = 0, max = 1)
+expected_pvals = expected_pvals[expected_pvals != 0 & expected_pvals != 1]
+df.qq = data.frame(observed = -log10(observed_pvals),
+expected = -log10(expected_pvals))
+# Plot
+ggplot(df.qq, aes(x = expected, y = observed)) +
+geom_point(alpha=0.5) +
+geom_abline(intercept = 0, slope = 1) +
+labs(x = '-log10 Expected p-val',
+y = '-log10 Observed p-val',
+title = 'Diabetes Logistic GWAS QQ plot')
+
+```
+
+### 9)
+
+Logistic GWAS with Covariate
+
+```{r}
+W <- read.table("2023QG_finalexam_ancestry.txt", header = F,stringsAsFactors = F)
+W <- as.matrix(W)
+colnames(W) <- NULL
+W[W[,1] < 1, 1] <- 1
+W[W[, 1] == 1, 1] <- 1
+W[W[,1] > 1, 1] <- 2
+
+logistic.IRLS.pval.recursive_covar <- function(Xa,Xd,Y,xc, beta.initial.vec = c(0,0,0,0),
+                                         d.stop.th = 1e-6, it.max = 100) {
+  #Initialize
+  beta_t <- beta.initial.vec
+    dt <- 0
+    
+  X_mx <- cbind(rep(1,nrow(Y)), Xa, Xd,xc)
+  gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+    h1 <- logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv,
+                                  1, d.stop.th = 1e-6, it.max = 100)
+    
+    X_mx <- cbind(rep(1,nrow(Y)), rep(0,nrow(Y)),rep(0,nrow(Y)), xc)
+  gamma_inv <- gamma_inv_calc(X_mx, beta_t)
+    h0 <- logistic.IRLS.recursive(Y, X_mx, beta_t, dt, gamma_inv,
+                                  1, d.stop.th = 1e-6, it.max = 100)
+
+    LRT <- 2*h1[[2]]-2*h0[[2]] #likelihood ratio test statistic
+  pval <- pchisq(LRT, 2, lower.tail = F)
+    return(pval)
+}
+pval_mx_covar_log_covar <- rep(0,ncol(geno_xa))
+for(i in 1:ncol(geno_xa)){
+  pval_mx_covar_log_covar[i] <- logistic.IRLS.pval.recursive_covar(Xa=geno_xa[,i], Xd=geno_xd[,i], Y=Y, xc=W)
+}
+pval_mx_covar_log_covar[1:10]
+
+
+plot_df_covar <- data.frame(index = 1:length(pval_mx_covar_log_covar), pval = pval_mx_covar_log_covar)
+plot_covar<-ggplot(plot_df_covar, aes(index, -log10(pval_mx_covar_log_covar))) + geom_point()
+
+plot_covar + geom_hline(yintercept = -log10(bonferroni))+ggtitle("Logistic GWAS Manhattan Plot w Covar") + xlab("SNP")
+
+observed_pvals = sort(pval_mx_covar_log_covar)
+expected_pvals = qunif(seq(0, 1, length.out = length(observed_pvals) + 2), min = 0, max = 1)
+expected_pvals = expected_pvals[expected_pvals != 0 & expected_pvals != 1]
+df.qq = data.frame(observed = -log10(observed_pvals),
+expected = -log10(expected_pvals))
+# Plot
+ggplot(df.qq, aes(x = expected, y = observed)) +
+geom_point(alpha=0.5) +
+geom_abline(intercept = 0, slope = 1) +
+labs(x = '-log10 Expected p-val',
+y = '-log10 Observed p-val',
+title = 'Diabetes GWAS QQ plot w Covariates')
+```
+
+### 10)
+
+a\.
+
+```{r}
+sig_hits_logistic <- subset(plot_df_covar,pval<bonferroni)
+```
+
+From the manhattan plot in [9] there are 2 separate distinct peaks: one around the \~1200 position, and at the \~17100 position. The most significant SNP of the peaks are : 1211 (p=2.468504e-13), and 17139 (p=4.409516e-12)
+
+b\.
+
+It is likely that the peaks in [9] indicate different casual genotypes than in [6] because insulin amounts do not always correlate to diabetes since there are two types of diabetes and Baseline Insulin Level and Disease State (healthy/diabetes) are complex traits influenced by various genetic, environmental, and lifestyle factors. Also, the distance between the peaks is large so it is unlikely an artifact of linkage disequilibrium.
+
+c\.
+
+Apart from a technical reason (the conservative bonferonni adjustment used which could have been too strict, thus making some SNPs not reach the threshold/cutoff), GWAS has few general limitations such as not detecting causal variants with very small effects, and not being able to capture rare variants well, thus leading to causal genotypes not being identified by GWAS.
